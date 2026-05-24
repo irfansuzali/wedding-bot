@@ -41,16 +41,25 @@ with open(_prompt_path, "r") as _f:
 def days_to_wedding() -> int:
     return (WEDDING_DATE - datetime.now()).days
 
+STATUS_EMOJI = {
+    "done":        "✅",
+    "in progress": "🔄",
+    "cancelled":   "❌",
+    "not started": "⬜",
+    "todo":        "⬜",  # legacy fallback
+}
+
 def format_tasks(tasks: list) -> str:
     if not tasks:
         return "No tasks found."
     lines = []
     for t in tasks:
-        due = f" · due {t.get('Due Date')}" if t.get("Due Date") else ""
-        status = "✅" if str(t.get("Status", "")).lower() == "done" else "⬜"
+        due    = f" · due {t.get('Due Date')}" if t.get("Due Date") else ""
+        status = str(t.get("Status", "")).lower()
+        emoji  = STATUS_EMOJI.get(status, "⬜")
         lines.append(
-            f"{status} #{t.get('ID','')} *{t.get('Title','')}* "
-            f"[{t.get('Assigned To','')} · {t.get('Category','')} · {t.get('Priority','')}]{due}"
+            f"{emoji} #{t.get('ID','')} *{t.get('Title','')}* "
+            f"[{t.get('Assigned To','')} · {t.get('Category','')} · {t.get('Priority','')} · {t.get('Status','')}]{due}"
         )
         if t.get("Notes"):
             lines.append(f"   _{t.get('Notes')}_")
@@ -147,6 +156,8 @@ def generate_briefing() -> str:
 
     prompt = f"""Today is {today}. {days_to_wedding()} days until the wedding on August 13, 2026.
 
+Task statuses in use: Not Started ⬜, In Progress 🔄, Done ✅, Cancelled ❌
+
 Wedding context (decisions & info built up over time):
 {wedding_context or "No context stored yet."}
 
@@ -155,11 +166,13 @@ All tasks:
 
 Generate a morning briefing in this exact structure:
 
-*🎯 Focus Today* — Pick the 1-3 most important things to do today and explain briefly why each one matters or is time-sensitive. Be direct and opinionated.
+*🎯 Focus Today* — Pick the 1-3 most important things to do today and explain briefly why each one matters or is time-sensitive. Be direct and opinionated. Prefer tasks that are Not Started or In Progress.
 
-*📋 Due Today* — Tasks with today's due date.
+*📋 Due Today* — Tasks with today's due date (exclude Cancelled and Done).
 
-*📅 This Week* — Tasks due in the next 7 days (not today).
+*📅 This Week* — Tasks due in the next 7 days (not today). Exclude Cancelled and Done.
+
+*🔄 In Progress* — Tasks currently marked In Progress. Flag any that seem stalled (no recent activity or past due date).
 
 *🚧 Blockers* — Tasks that can't proceed because something else isn't done yet. Name both the blocked task and what's blocking it.
 
@@ -208,7 +221,14 @@ def parse_and_execute(response_text: str, thread_ts: str = None, channel: str = 
     elif action == "COMPLETE_TASK" and params:
         task_id = params[0].strip()
         ok = update_task_status(SHEET_ID, task_id, "Done")
-        clean += f"\n\n✅ *Task #{task_id} marked as done!*" if ok else "\n\n⚠️ Couldn't update sheet — please update manually."
+        clean += f"\n\n✅ *Task #{task_id} marked as Done!*" if ok else "\n\n⚠️ Couldn't update sheet — please update manually."
+
+    elif action == "UPDATE_STATUS" and len(params) >= 2:
+        task_id    = params[0].strip()
+        new_status = params[1].strip()
+        ok = update_task_status(SHEET_ID, task_id, new_status)
+        status_emoji = STATUS_EMOJI.get(new_status.lower(), "🔄")
+        clean += f"\n\n{status_emoji} *Task #{task_id} updated to {new_status}!*" if ok else "\n\n⚠️ Couldn't update sheet — please update manually."
 
     return clean
 

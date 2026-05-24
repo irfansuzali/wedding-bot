@@ -55,7 +55,7 @@ def add_task(
             category,
             priority,
             due_date,
-            "Todo",
+            "Not Started",
             notes,
             datetime.now().strftime("%Y-%m-%d"),
         ])

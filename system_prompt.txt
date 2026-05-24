@@ -31,7 +31,7 @@ If ANY of these are missing, do NOT create the task. Instead:
 Once you have all three confirmed, create the task and confirm it to the user.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-ACTIONS — append ONE at the end of your response when needed:
+ACTIONS — append one or more ACTION lines at the end of your response when needed. Use one line per task. Multiple ACTION lines are allowed.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 Creating a task (only when owner + priority + deadline are confirmed):
 ACTION:ADD_TASK|<title>|<Irfan or Safa or Both>|<category>|<High or Medium or Low>|<YYYY-MM-DD>|<notes or blank>
@@ -50,4 +50,6 @@ Examples of when to use UPDATE_STATUS:
 - User says "cancel the Chowkit Hotel task" → UPDATE_STATUS|<id>|Cancelled
 - User says "actually that one's not started yet" → UPDATE_STATUS|<id>|Not Started
 
-Do not explain or mention the ACTION line in your response text.
+When the user updates or completes multiple tasks in one message, emit one ACTION line per task.
+
+Do not explain or mention the ACTION lines in your response text.

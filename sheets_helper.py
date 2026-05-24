@@ -108,3 +108,28 @@ def update_task_status(sheet_id: str, task_id: str, status: str) -> bool:
     except Exception as e:
         print(f"[sheets] Error updating task: {e}")
         return False
+
+def batch_update_task_statuses(sheet_id: str, updates: list) -> list:
+    """Update multiple task statuses in one sheets round-trip.
+    updates: list of (task_id, status) tuples.
+    Returns: list of booleans in the same order as updates."""
+    try:
+        ws = _tasks_sheet(sheet_id)
+        records = ws.get_all_records()
+        id_to_row = {str(r.get("ID")): i for i, r in enumerate(records, start=2)}
+
+        results = [False] * len(updates)
+        cells_to_update = []
+        for idx, (task_id, status) in enumerate(updates):
+            row = id_to_row.get(str(task_id))
+            if row:
+                cells_to_update.append(gspread.Cell(row, 7, status))
+                results[idx] = True
+
+        if cells_to_update:
+            ws.update_cells(cells_to_update)
+
+        return results
+    except Exception as e:
+        print(f"[sheets] Error batch updating tasks: {e}")
+        return [False] * len(updates)

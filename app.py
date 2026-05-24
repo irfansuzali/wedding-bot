@@ -15,7 +15,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import anthropic
-from sheets_helper import get_tasks, add_task, update_task_status
+from sheets_helper import get_tasks, add_task, update_task_status, batch_update_task_statuses
 from docs_helper import get_doc_content, append_to_doc
 
 # ── INIT ──────────────────────────────────────────────────────────────────────
@@ -190,45 +190,64 @@ Keep it tight, specific, and actionable. Use Slack formatting (*bold*, • bulle
     return response.content[0].text
 
 # ── ACTION PARSER ─────────────────────────────────────────────────────────────
-def parse_and_execute(response_text: str, thread_ts: str = None, channel: str = None) -> str:
-    # Match both ACTION lines with and without params
-    match = re.search(r'\nACTION:(\w+)(\|.+)?$', response_text, re.MULTILINE)
-    if not match:
+def parse_and_execute(response_text: str, tasks: list = None, thread_ts: str = None, channel: str = None) -> str:
+    lines = response_text.split("\n")
+    action_lines = [l for l in lines if l.startswith("ACTION:")]
+    if not action_lines:
         return response_text
 
-    action = match.group(1)
-    params = match.group(2).lstrip("|").split("|") if match.group(2) else []
-    clean  = response_text[:match.start()].strip()
+    # Build a quick id→title lookup from the current task list
+    task_titles = {str(t.get("ID")): t.get("Title", "") for t in (tasks or [])}
 
-    if action == "AWAITING_INFO":
-        # Bot is waiting for the user to supply missing task details — track this thread
-        if thread_ts and channel:
-            pending_threads[thread_ts] = channel
+    def task_label(task_id: str) -> str:
+        title = task_titles.get(str(task_id))
+        return f"#{task_id} — {title}" if title else f"#{task_id}"
 
-    elif action == "ADD_TASK" and len(params) >= 5:
-        title       = params[0].strip()
-        assigned_to = params[1].strip()
-        category    = params[2].strip()
-        priority    = params[3].strip()
-        due_date    = params[4].strip() if len(params) > 4 else ""
-        notes       = params[5].strip() if len(params) > 5 else ""
-        ok = add_task(SHEET_ID, title, assigned_to, category, priority, due_date, notes)
-        clean += "\n\n✅ *Task added to your Google Sheet!*" if ok else "\n\n⚠️ Couldn't write to sheet — please add manually."
-        # Task created — stop watching this thread
-        if thread_ts and thread_ts in pending_threads:
-            del pending_threads[thread_ts]
+    clean = "\n".join(l for l in lines if not l.startswith("ACTION:")).strip()
+    confirmations = []
+    status_updates = []   # list of (task_id, status, label) — batched into one sheets call
 
-    elif action == "COMPLETE_TASK" and params:
-        task_id = params[0].strip()
-        ok = update_task_status(SHEET_ID, task_id, "Done")
-        clean += f"\n\n✅ *Task #{task_id} marked as Done!*" if ok else "\n\n⚠️ Couldn't update sheet — please update manually."
+    for line in action_lines:
+        parts  = line.split("|")
+        action = parts[0][len("ACTION:"):]
+        params = [p.strip() for p in parts[1:]]
 
-    elif action == "UPDATE_STATUS" and len(params) >= 2:
-        task_id    = params[0].strip()
-        new_status = params[1].strip()
-        ok = update_task_status(SHEET_ID, task_id, new_status)
-        status_emoji = STATUS_EMOJI.get(new_status.lower(), "🔄")
-        clean += f"\n\n{status_emoji} *Task #{task_id} updated to {new_status}!*" if ok else "\n\n⚠️ Couldn't update sheet — please update manually."
+        if action == "AWAITING_INFO":
+            if thread_ts and channel:
+                pending_threads[thread_ts] = channel
+
+        elif action == "ADD_TASK" and len(params) >= 5:
+            title, assigned_to, category, priority = params[0], params[1], params[2], params[3]
+            due_date = params[4] if len(params) > 4 else ""
+            notes    = params[5] if len(params) > 5 else ""
+            ok = add_task(SHEET_ID, title, assigned_to, category, priority, due_date, notes)
+            if ok:
+                due_str = f" · due {due_date}" if due_date else ""
+                confirmations.append(f"✅ *Added to Google Sheet:* {title} [{assigned_to} · {category} · {priority}{due_str}]")
+            else:
+                confirmations.append(f"⚠️ Couldn't write \"{title}\" to sheet — please add manually.")
+            if thread_ts and thread_ts in pending_threads:
+                del pending_threads[thread_ts]
+
+        elif action == "COMPLETE_TASK" and params:
+            task_id = params[0]
+            label   = task_label(task_id)
+            status_updates.append((task_id, "Done", f"✅ *Marked Done in Google Sheet:* {label}", f"⚠️ Couldn't update {label} — please update manually."))
+
+        elif action == "UPDATE_STATUS" and len(params) >= 2:
+            task_id, new_status = params[0], params[1]
+            emoji = STATUS_EMOJI.get(new_status.lower(), "🔄")
+            label = task_label(task_id)
+            status_updates.append((task_id, new_status, f"{emoji} *Updated in Google Sheet:* {label} → {new_status}", f"⚠️ Couldn't update {label} — please update manually."))
+
+    # Batch all status updates into a single sheets round-trip
+    if status_updates:
+        results = batch_update_task_statuses(SHEET_ID, [(t[0], t[1]) for t in status_updates])
+        for (_, _, ok_msg, fail_msg), ok in zip(status_updates, results):
+            confirmations.append(ok_msg if ok else fail_msg)
+
+    if confirmations:
+        clean += "\n\n" + "\n".join(confirmations)
 
     return clean
 
@@ -257,7 +276,7 @@ def handle_mention(event, client):
     tasks          = get_tasks(SHEET_ID)
     thread_history = get_thread_history(client, channel, thread_ts)
     response       = ask_claude(text, tasks, user_name, thread_history)
-    response       = parse_and_execute(response, thread_ts=thread_ts, channel=channel)
+    response       = parse_and_execute(response, tasks=tasks, thread_ts=thread_ts, channel=channel)
 
     # Update the thinking message with the real response
     client.chat_update(
@@ -294,7 +313,7 @@ def handle_pending_thread_reply(event, client):
     tasks          = get_tasks(SHEET_ID)
     thread_history = get_thread_history(client, channel, thread_ts)
     response       = ask_claude(text, tasks, user_name, thread_history)
-    response       = parse_and_execute(response, thread_ts=thread_ts, channel=channel)
+    response       = parse_and_execute(response, tasks=tasks, thread_ts=thread_ts, channel=channel)
 
     client.chat_update(channel=channel, ts=thinking["ts"], text=response)
 
@@ -334,7 +353,7 @@ def handle_message(event, client):
     user_name = get_user_name(user_id)
     tasks     = get_tasks(SHEET_ID)
     response  = ask_claude(text, tasks, user_name)
-    response  = parse_and_execute(response)
+    response  = parse_and_execute(response, tasks=tasks)
 
     # Replace thinking message with actual response
     client.chat_update(

@@ -76,14 +76,36 @@ def get_user_name(user_id: str) -> str:
     except Exception:
         return "Someone"
 
+# ── THREAD HISTORY ────────────────────────────────────────────────────────────
+def get_thread_history(client, channel: str, thread_ts: str) -> list:
+    """Fetch and format all previous messages in a thread for Claude's context."""
+    try:
+        result = client.conversations_replies(channel=channel, ts=thread_ts)
+        messages = result.get("messages", [])[:-1]  # Exclude the current message
+        history = []
+        for msg in messages:
+            text = re.sub(r"<@[A-Z0-9]+>", "", msg.get("text", "")).strip()
+            if not text or "⏳" in text:  # Skip empty or thinking messages
+                continue
+            speaker = "Assistant" if msg.get("bot_id") else f"{msg.get('user', 'User')}"
+            history.append(f"{speaker}: {text}")
+        return history
+    except Exception as e:
+        print(f"[slack] Error fetching thread history: {e}")
+        return []
+
 # ── CLAUDE RESPONSE ───────────────────────────────────────────────────────────
-def ask_claude(user_message: str, tasks: list, user_name: str = "") -> str:
+def ask_claude(user_message: str, tasks: list, user_name: str = "", thread_history: list = None) -> str:
     today = datetime.now().strftime("%A, %B %d, %Y")
+
+    thread_context = ""
+    if thread_history:
+        thread_context = "\nThread conversation so far:\n" + "\n".join(thread_history) + "\n"
 
     context = f"""Today is {today}. {days_to_wedding()} days until the wedding.
 
 Sent by: {user_name or "unknown"}
-
+{thread_context}
 Current tasks:
 {format_tasks(tasks)}
 
@@ -172,10 +194,11 @@ def handle_mention(event, client):
     )
 
     # Now do the work (this takes a few seconds)
-    user_name = get_user_name(user_id)
-    tasks     = get_tasks(SHEET_ID)
-    response  = ask_claude(text, tasks, user_name)
-    response  = parse_and_execute(response)
+    user_name      = get_user_name(user_id)
+    tasks          = get_tasks(SHEET_ID)
+    thread_history = get_thread_history(client, channel, thread_ts)
+    response       = ask_claude(text, tasks, user_name, thread_history)
+    response       = parse_and_execute(response)
 
     # Update the thinking message with the real response
     client.chat_update(

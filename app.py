@@ -16,12 +16,14 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import anthropic
 from sheets_helper import get_tasks, add_task, update_task_status
+from docs_helper import get_doc_content, append_to_doc
 
 # ── INIT ──────────────────────────────────────────────────────────────────────
 slack_app = App(token=os.environ["SLACK_BOT_TOKEN"])
 anthropic_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 SHEET_ID        = os.environ.get("GOOGLE_SHEET_ID", "130s9muvmIyyRsGP8DdewBjilvgDcBDxw2zhHqlQ7U4w")
+DOC_ID          = os.environ.get("WEDDING_DOC_ID", "1XqVdc0BWyqZby2cTMXLq9A-qqjoQt6Nb8QnVL3lgCL0")
 WEDDING_CHANNEL = os.environ.get("SLACK_CHANNEL_ID", "")
 WEDDING_DATE    = datetime(2026, 8, 13)
 
@@ -94,9 +96,38 @@ def get_thread_history(client, channel: str, thread_ts: str) -> list:
         print(f"[slack] Error fetching thread history: {e}")
         return []
 
+# ── CONTEXT EXTRACTION ────────────────────────────────────────────────────────
+def extract_and_store_context(conversation: str):
+    """After each conversation, check if anything important should be remembered in the wedding doc."""
+    prompt = f"""Read this wedding planning conversation and extract any important information worth remembering long-term — vendor decisions, guest details, budget constraints, preferences, confirmed bookings, or key decisions made.
+
+Conversation:
+{conversation}
+
+If nothing worth storing, reply only: NONE
+Otherwise reply with one line per item in this exact format:
+CONTEXT:<category>|<concise note>
+
+Categories: Vendor, Guest, Budget, Decision, Venue, Accommodation, Honeymoon, Timeline, General"""
+
+    response = anthropic_client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=300,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    text = response.content[0].text.strip()
+    if text.upper() == "NONE":
+        return
+    for line in text.split("\n"):
+        if line.startswith("CONTEXT:"):
+            parts = line[8:].split("|", 1)
+            if len(parts) == 2:
+                append_to_doc(DOC_ID, parts[0].strip(), parts[1].strip())
+
 # ── CLAUDE RESPONSE ───────────────────────────────────────────────────────────
 def ask_claude(user_message: str, tasks: list, user_name: str = "", thread_history: list = None) -> str:
     today = datetime.now().strftime("%A, %B %d, %Y")
+    wedding_context = get_doc_content(DOC_ID)
 
     thread_context = ""
     if thread_history:
@@ -106,6 +137,9 @@ def ask_claude(user_message: str, tasks: list, user_name: str = "", thread_histo
 
 Sent by: {user_name or "unknown"}
 {thread_context}
+Wedding context (decisions & info built up over time):
+{wedding_context or "No context stored yet."}
+
 Current tasks:
 {format_tasks(tasks)}
 
@@ -121,26 +155,36 @@ User message: {user_message}"""
 
 # ── BRIEFING ──────────────────────────────────────────────────────────────────
 def generate_briefing() -> str:
-    tasks = get_tasks(SHEET_ID)
-    today = datetime.now().strftime("%A, %B %d, %Y")
+    tasks           = get_tasks(SHEET_ID)
+    wedding_context = get_doc_content(DOC_ID)
+    today           = datetime.now().strftime("%A, %B %d, %Y")
 
-    prompt = f"""Today is {today}. {days_to_wedding()} days until the wedding.
+    prompt = f"""Today is {today}. {days_to_wedding()} days until the wedding on August 13, 2026.
 
-Tasks:
+Wedding context (decisions & info built up over time):
+{wedding_context or "No context stored yet."}
+
+All tasks:
 {format_tasks(tasks)}
 
-Generate a morning briefing with these sections:
-1. *Today's Priorities* — tasks due today
-2. *This Week* — tasks due in the next 7 days (not today)
-3. *Blockers* — tasks that can't proceed because a dependency isn't done yet
-4. *Risks* — tight timelines, unconfirmed vendors, tasks with no due date that are time-sensitive, tasks with no owner
+Generate a morning briefing in this exact structure:
 
-If a section has nothing to report, say "Nothing for today" — don't skip it.
-Start with a one-line summary. Keep it tight and actionable."""
+*🎯 Focus Today* — Pick the 1-3 most important things to do today and explain briefly why each one matters or is time-sensitive. Be direct and opinionated.
+
+*📋 Due Today* — Tasks with today's due date.
+
+*📅 This Week* — Tasks due in the next 7 days (not today).
+
+*🚧 Blockers* — Tasks that can't proceed because something else isn't done yet. Name both the blocked task and what's blocking it.
+
+*⚠️ Risks* — Tight timelines, unconfirmed vendors, tasks with no due date that are time-sensitive, anything that could cause problems if not addressed soon.
+
+If a section has nothing to report, say "Nothing for now" — don't skip it.
+Keep it tight, specific, and actionable. Use Slack formatting (*bold*, • bullets)."""
 
     response = anthropic_client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=800,
+        max_tokens=1000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -206,6 +250,10 @@ def handle_mention(event, client):
         ts=thinking["ts"],
         text=response
     )
+
+    # Silently extract and store any important wedding context from this exchange
+    full_exchange = "\n".join(thread_history or []) + f"\n{user_name}: {text}\nAssistant: {response}"
+    extract_and_store_context(full_exchange)
 
 @slack_app.event("message")
 def handle_dm(event, client):

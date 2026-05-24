@@ -64,6 +64,38 @@ def add_task(
         print(f"[sheets] Error adding task: {e}")
         return False
 
+def get_wedding_context(sheet_id: str) -> list:
+    """Read stored wedding context notes."""
+    try:
+        client = _client()
+        wb = client.open_by_key(sheet_id)
+        ws = wb.worksheet("Wedding Context")
+        return ws.get_all_records()
+    except Exception as e:
+        print(f"[sheets] Wedding Context tab not found or error: {e}")
+        return []
+
+def add_wedding_context(sheet_id: str, category: str, note: str) -> bool:
+    """Store an important piece of wedding context."""
+    try:
+        client = _client()
+        wb = client.open_by_key(sheet_id)
+        try:
+            ws = wb.worksheet("Wedding Context")
+        except gspread.WorksheetNotFound:
+            print("[sheets] Wedding Context tab doesn't exist yet.")
+            return False
+        ws.append_row([
+            datetime.now().strftime("%Y-%m-%d"),
+            category,
+            note,
+            "Slack"
+        ])
+        return True
+    except Exception as e:
+        print(f"[sheets] Error storing context: {e}")
+        return False
+
 def update_task_status(sheet_id: str, task_id: str, status: str) -> bool:
     try:
         ws = _tasks_sheet(sheet_id)

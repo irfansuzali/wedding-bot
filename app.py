@@ -27,6 +27,10 @@ DOC_ID          = os.environ.get("WEDDING_DOC_ID", "1XqVdc0BWyqZby2cTMXLq9A-qqjo
 WEDDING_CHANNEL = os.environ.get("SLACK_CHANNEL_ID", "")
 WEDDING_DATE    = datetime(2026, 8, 13)
 
+# Threads where the bot is actively waiting for follow-up info
+# Maps thread_ts -> channel_id
+pending_threads: dict = {}
+
 # ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are the wedding planning assistant for Irfan and Safa, who are getting married on August 13, 2026. You live in their Slack workspace and help them stay on top of everything.
 
@@ -43,13 +47,35 @@ Slack formatting rules:
 - Keep responses concise — this is a chat, not a document
 - Never use markdown headers (##) — use *bold* instead
 
-When the user asks you to ADD a task, append this exact line at the very end of your response (after your message):
-ACTION:ADD_TASK|<title>|<Irfan or Safa or Both>|<category>|<High or Medium or Low>|<YYYY-MM-DD or blank>|<notes or blank>
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+TASK CREATION RULES — follow these strictly:
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+A task CANNOT be created without ALL THREE of the following:
+  1. Owner — who is responsible: Irfan, Safa, or Both
+  2. Priority — High, Medium, or Low
+  3. Deadline — a specific due date
 
-When the user asks you to MARK a task as done, append:
+If ANY of these are missing, do NOT create the task. Instead:
+- Tell the user what you're about to add
+- Ask for the missing fields in a single clear message
+- Wait for their reply before creating anything
+- Append: ACTION:AWAITING_INFO
+
+Once you have all three confirmed, create the task and confirm it to the user.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+ACTIONS — append ONE at the end of your response when needed:
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Creating a task (only when owner + priority + deadline are confirmed):
+ACTION:ADD_TASK|<title>|<Irfan or Safa or Both>|<category>|<High or Medium or Low>|<YYYY-MM-DD>|<notes or blank>
+
+Marking a task done:
 ACTION:COMPLETE_TASK|<task_id>
 
-Only include one ACTION line per response. Do not explain or mention the ACTION line in your text."""
+Waiting for missing task info:
+ACTION:AWAITING_INFO
+
+Do not explain or mention the ACTION line in your response text."""
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 def days_to_wedding() -> int:
@@ -191,16 +217,22 @@ Keep it tight, specific, and actionable. Use Slack formatting (*bold*, • bulle
     return response.content[0].text
 
 # ── ACTION PARSER ─────────────────────────────────────────────────────────────
-def parse_and_execute(response_text: str) -> str:
-    match = re.search(r'\nACTION:(\w+)\|(.+)$', response_text, re.MULTILINE)
+def parse_and_execute(response_text: str, thread_ts: str = None, channel: str = None) -> str:
+    # Match both ACTION lines with and without params
+    match = re.search(r'\nACTION:(\w+)(\|.+)?$', response_text, re.MULTILINE)
     if not match:
         return response_text
 
     action = match.group(1)
-    params = match.group(2).split("|")
-    clean = response_text[:match.start()].strip()
+    params = match.group(2).lstrip("|").split("|") if match.group(2) else []
+    clean  = response_text[:match.start()].strip()
 
-    if action == "ADD_TASK" and len(params) >= 5:
+    if action == "AWAITING_INFO":
+        # Bot is waiting for the user to supply missing task details — track this thread
+        if thread_ts and channel:
+            pending_threads[thread_ts] = channel
+
+    elif action == "ADD_TASK" and len(params) >= 5:
         title       = params[0].strip()
         assigned_to = params[1].strip()
         category    = params[2].strip()
@@ -209,6 +241,9 @@ def parse_and_execute(response_text: str) -> str:
         notes       = params[5].strip() if len(params) > 5 else ""
         ok = add_task(SHEET_ID, title, assigned_to, category, priority, due_date, notes)
         clean += "\n\n✅ *Task added to your Google Sheet!*" if ok else "\n\n⚠️ Couldn't write to sheet — please add manually."
+        # Task created — stop watching this thread
+        if thread_ts and thread_ts in pending_threads:
+            del pending_threads[thread_ts]
 
     elif action == "COMPLETE_TASK" and params:
         task_id = params[0].strip()
@@ -242,7 +277,7 @@ def handle_mention(event, client):
     tasks          = get_tasks(SHEET_ID)
     thread_history = get_thread_history(client, channel, thread_ts)
     response       = ask_claude(text, tasks, user_name, thread_history)
-    response       = parse_and_execute(response)
+    response       = parse_and_execute(response, thread_ts=thread_ts, channel=channel)
 
     # Update the thinking message with the real response
     client.chat_update(
@@ -255,18 +290,60 @@ def handle_mention(event, client):
     full_exchange = "\n".join(thread_history or []) + f"\n{user_name}: {text}\nAssistant: {response}"
     extract_and_store_context(full_exchange)
 
-@slack_app.event("message")
-def handle_dm(event, client):
-    """Respond to direct messages with a thinking indicator."""
-    # Only handle DMs (channel_type == "im"), not channel messages
-    if event.get("channel_type") != "im":
+def handle_pending_thread_reply(event, client):
+    """Respond to a message in a thread the bot is actively following for task info."""
+    thread_ts = event.get("thread_ts")
+    channel   = pending_threads.get(thread_ts)
+    if not channel:
         return
     if event.get("bot_id") or event.get("subtype"):
         return
 
-    user_id  = event.get("user", "")
-    channel  = event.get("channel")
-    text     = event.get("text", "").strip()
+    user_id = event.get("user", "")
+    text    = event.get("text", "").strip()
+    if not text:
+        return
+
+    thinking = client.chat_postMessage(
+        channel=channel,
+        thread_ts=thread_ts,
+        text="⏳ On it, give me a sec..."
+    )
+
+    user_name      = get_user_name(user_id)
+    tasks          = get_tasks(SHEET_ID)
+    thread_history = get_thread_history(client, channel, thread_ts)
+    response       = ask_claude(text, tasks, user_name, thread_history)
+    response       = parse_and_execute(response, thread_ts=thread_ts, channel=channel)
+
+    client.chat_update(channel=channel, ts=thinking["ts"], text=response)
+
+    full_exchange = "\n".join(thread_history or []) + f"\n{user_name}: {text}\nAssistant: {response}"
+    extract_and_store_context(full_exchange)
+
+@slack_app.event("message")
+def handle_message(event, client):
+    """Handle DMs (reply directly) and channel thread replies when bot is awaiting task info."""
+    if event.get("bot_id") or event.get("subtype"):
+        return
+
+    channel_type = event.get("channel_type")
+    thread_ts    = event.get("thread_ts")
+
+    # Route channel thread replies to the pending-thread handler
+    if channel_type != "im" and thread_ts:
+        handle_pending_thread_reply(event, client)
+        return
+
+    # Only continue for DMs
+    if channel_type != "im":
+        return
+
+    user_id = event.get("user", "")
+    channel = event.get("channel")
+    text    = event.get("text", "").strip()
+    if not text:
+        return
 
     # Thinking indicator
     thinking = client.chat_postMessage(

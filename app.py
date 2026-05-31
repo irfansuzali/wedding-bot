@@ -106,7 +106,7 @@ CONTEXT:<category>|<concise note>
 Categories: Vendor, Guest, Budget, Decision, Venue, Accommodation, Honeymoon, Timeline, General"""
 
     response = anthropic_client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5-20251001",
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -141,7 +141,7 @@ Current tasks:
 User message: {user_message}"""
 
     response = anthropic_client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5-20251001",
         max_tokens=800,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": context}]
@@ -182,7 +182,7 @@ If a section has nothing to report, say "Nothing for now" — don't skip it.
 Keep it tight, specific, and actionable. Use Slack formatting (*bold*, • bullets)."""
 
     response = anthropic_client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5-20251001",
         max_tokens=1000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}]
@@ -271,12 +271,20 @@ def handle_mention(event, client):
         text="⏳ On it, give me a sec..."
     )
 
-    # Now do the work (this takes a few seconds)
-    user_name      = get_user_name(user_id)
-    tasks          = get_tasks(SHEET_ID)
-    thread_history = get_thread_history(client, channel, thread_ts)
-    response       = ask_claude(text, tasks, user_name, thread_history)
-    response       = parse_and_execute(response, tasks=tasks, thread_ts=thread_ts, channel=channel)
+    try:
+        # Now do the work (this takes a few seconds)
+        user_name      = get_user_name(user_id)
+        tasks          = get_tasks(SHEET_ID)
+        thread_history = get_thread_history(client, channel, thread_ts)
+        response       = ask_claude(text, tasks, user_name, thread_history)
+        response       = parse_and_execute(response, tasks=tasks, thread_ts=thread_ts, channel=channel)
+
+        # Silently extract and store any important wedding context from this exchange
+        full_exchange = "\n".join(thread_history or []) + f"\n{user_name}: {text}\nAssistant: {response}"
+        extract_and_store_context(full_exchange)
+    except Exception as e:
+        print(f"[bot] Error handling mention from {user_id}: {e}")
+        response = "⚠️ Sorry, something went wrong on my end. Please try again in a moment!"
 
     # Update the thinking message with the real response
     client.chat_update(
@@ -284,10 +292,6 @@ def handle_mention(event, client):
         ts=thinking["ts"],
         text=response
     )
-
-    # Silently extract and store any important wedding context from this exchange
-    full_exchange = "\n".join(thread_history or []) + f"\n{user_name}: {text}\nAssistant: {response}"
-    extract_and_store_context(full_exchange)
 
 def handle_pending_thread_reply(event, client):
     """Respond to a message in a thread the bot is actively following for task info."""
@@ -328,8 +332,14 @@ def handle_message(event, client):
 
     channel_type = event.get("channel_type")
     thread_ts    = event.get("thread_ts")
+    text         = event.get("text", "")
 
-    # Route channel thread replies to the pending-thread handler
+    # If the message contains a @mention anywhere, handle_mention will pick it up.
+    # Return here to avoid double-processing (which causes duplicate task creation).
+    if re.search(r"<@[A-Z0-9]+>", text):
+        return
+
+    # Route channel thread replies to the pending-thread handler.
     if channel_type != "im" and thread_ts:
         handle_pending_thread_reply(event, client)
         return

@@ -106,7 +106,7 @@ CONTEXT:<category>|<concise note>
 Categories: Vendor, Guest, Budget, Decision, Venue, Accommodation, Honeymoon, Timeline, General"""
 
     response = anthropic_client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model="claude-sonnet-4-6",
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -141,7 +141,7 @@ Current tasks:
 User message: {user_message}"""
 
     response = anthropic_client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model="claude-sonnet-4-6",
         max_tokens=800,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": context}]
@@ -182,7 +182,7 @@ If a section has nothing to report, say "Nothing for now" — don't skip it.
 Keep it tight, specific, and actionable. Use Slack formatting (*bold*, • bullets)."""
 
     response = anthropic_client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model="claude-sonnet-4-6",
         max_tokens=1000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}]
